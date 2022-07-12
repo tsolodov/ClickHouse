@@ -297,7 +297,12 @@ MutationsInterpreter::MutationsInterpreter(
     , is_lightweight(is_lightweight_)
 {
     if (is_lightweight)
-        mutation_ast = prepareLightweightDelete(!can_execute);
+    {
+        if (context->getSettings().allow_experimental_lwd2)
+            mutation_ast = prepareLWD2(!can_execute);
+        else
+            mutation_ast = prepareLightweightDelete(!can_execute);
+    }
     else
         mutation_ast = prepare(!can_execute);
 }
@@ -354,7 +359,7 @@ static void validateUpdateColumns(
             }
         }
 
-        if (!found)
+        if (!found && column_name != "__row_exists") /// TODO: properly handle updating __row_exists column for LWD
         {
             for (const auto & col : metadata_snapshot->getColumns().getMaterialized())
             {
@@ -507,7 +512,7 @@ ASTPtr MutationsInterpreter::prepare(bool dry_run)
                 ///
                 /// Outer CAST is added just in case if we don't trust the returning type of 'if'.
 
-                const auto & type = columns_desc.getPhysical(column).type;
+                const auto type = (column == "__row_exists" ?  std::make_shared<DataTypeUInt8>() : columns_desc.getPhysical(column).type);
                 auto type_literal = std::make_shared<ASTLiteral>(type->getName());
 
                 const auto & update_expr = kv.second;
@@ -930,6 +935,72 @@ ASTPtr MutationsInterpreter::prepareLightweightDelete(bool dry_run)
 }
 
 ASTPtr MutationsInterpreter::prepareInterpreterSelectQueryLightweight(std::vector<Stage> & prepared_stages, bool)
+{
+    /// Construct a SELECT statement for lightweight delete is like "select _part_offset from db.table where <filters>"
+    auto select = std::make_shared<ASTSelectQuery>();
+
+    /// DELETEs only query just need the _part_offset virtual column without real columns
+    select->setExpression(ASTSelectQuery::Expression::SELECT, std::make_shared<ASTExpressionList>());
+    select->select()->children.push_back(std::make_shared<ASTIdentifier>("_part_offset"));
+
+    ASTPtr where_expression;
+    if (!prepared_stages[0].filters.empty())
+    {
+        if (prepared_stages[0].filters.size() == 1)
+            where_expression = prepared_stages[0].filters[0];
+        else
+        {
+            auto coalesced_predicates = std::make_shared<ASTFunction>();
+            coalesced_predicates->name = "or";
+            coalesced_predicates->arguments = std::make_shared<ASTExpressionList>();
+            coalesced_predicates->children.push_back(coalesced_predicates->arguments);
+            coalesced_predicates->arguments->children = prepared_stages[0].filters;
+            where_expression = std::move(coalesced_predicates);
+        }
+
+        select->setExpression(ASTSelectQuery::Expression::WHERE, std::move(where_expression));
+    }
+
+    return select;
+}
+
+
+
+/// Prepare for lightweight delete
+ASTPtr MutationsInterpreter::prepareLWD2(bool dry_run)
+{
+    if (is_prepared)
+        throw Exception("MutationsInterpreter is already prepared. It is a bug.", ErrorCodes::LOGICAL_ERROR);
+
+    if (commands.empty())
+        throw Exception("Empty mutation commands list", ErrorCodes::LOGICAL_ERROR);
+
+    /// For lightweight DELETE, we use predicate expression to get deleted rows.
+    /// Collect predicates in the commands
+    for (auto & command : commands)
+    {
+        if (command.type == MutationCommand::DELETE)
+        {
+            mutation_kind.set(MutationKind::MUTATE_OTHER);
+            if (stages.empty())
+                stages.emplace_back(context);
+
+            auto mask_predicate = getPartitionAndPredicateExpressionForMutationCommand(command);
+            stages.back().filters.push_back(mask_predicate);
+        }
+        else
+            throw Exception("Unsupported lightweight mutation command type: " + DB::toString<int>(command.type), ErrorCodes::UNKNOWN_MUTATION_COMMAND);
+    }
+
+    /// The updated_header is empty for lightweight delete.
+    updated_header = std::make_unique<Block>();
+
+    is_prepared = true;
+
+    return prepareInterpreterSelectQueryLWD2(stages, dry_run);
+}
+
+ASTPtr MutationsInterpreter::prepareInterpreterSelectQueryLWD2(std::vector<Stage> & prepared_stages, bool)
 {
     /// Construct a SELECT statement for lightweight delete is like "select _part_offset from db.table where <filters>"
     auto select = std::make_shared<ASTSelectQuery>();

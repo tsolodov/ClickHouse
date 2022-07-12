@@ -84,11 +84,13 @@ public:
 private:
     ASTPtr prepare(bool dry_run);
     ASTPtr prepareLightweightDelete(bool dry_run);
+    ASTPtr prepareLWD2(bool dry_run);
 
     struct Stage;
 
     ASTPtr prepareInterpreterSelectQuery(std::vector<Stage> &prepared_stages, bool dry_run);
     static ASTPtr prepareInterpreterSelectQueryLightweight(std::vector<Stage> &prepared_stages, bool dry_run);
+    static ASTPtr prepareInterpreterSelectQueryLWD2(std::vector<Stage> &prepared_stages, bool dry_run);
 
     QueryPipelineBuilder addStreamsForLaterStages(const std::vector<Stage> & prepared_stages, QueryPlan & plan) const;
 
