@@ -28,15 +28,14 @@ namespace ErrorCodes
 {
     extern const int ILLEGAL_TYPE_OF_ARGUMENT;
     extern const int ILLEGAL_COLUMN;
-    extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
 }
 
 
-template <typename Impl, typename Name>
+template <typename Impl>
 class FunctionsMultiStringPosition : public IFunction
 {
 public:
-    static constexpr auto name = Name::name;
+    static constexpr auto name = Impl::name;
 
     static FunctionPtr create(ContextPtr) { return std::make_shared<FunctionsMultiStringPosition>(); }
     String getName() const override { return name; }
@@ -75,18 +74,6 @@ public:
                 ErrorCodes::ILLEGAL_COLUMN,
                 "Illegal column {}. The array is not const", arguments[1].column->getName());
 
-        Array needles_arr = col_needles_const->getValue<Array>();
-
-        if (needles_arr.size() > std::numeric_limits<UInt8>::max())
-            throw Exception(
-                ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH,
-                "Number of arguments for function {} doesn't match: passed {}, should be at most 255", getName(), needles_arr.size());
-
-        std::vector<std::string_view> needles;
-        needles.reserve(needles_arr.size());
-        for (const auto & el : needles_arr)
-            needles.emplace_back(el.get<String>());
-
         const size_t column_haystack_size = haystack_ptr->size();
 
         using ResultType = typename Impl::ResultType;
@@ -95,21 +82,18 @@ public:
 
         auto & vec_res = col_res->getData();
         auto & offsets_res = col_offsets->getData();
-
-        vec_res.resize(column_haystack_size * needles.size());
+        /// the implementations are responsible for resizing the output column
 
         if (col_haystack_vector)
-            Impl::vectorConstant(col_haystack_vector->getChars(), col_haystack_vector->getOffsets(), needles, vec_res);
+            Impl::vectorConstant(
+                col_haystack_vector->getChars(), col_haystack_vector->getOffsets(),
+                /// needles,
+                col_needles_const->getValue<Array>(),
+                vec_res, offsets_res);
         else
             throw Exception(
                     ErrorCodes::ILLEGAL_COLUMN,
                     "Illegal column {}", arguments[0].column->getName());
-
-        size_t needles_size = needles.size();
-        size_t accum = needles_size;
-
-        for (size_t i = 0; i < column_haystack_size; ++i, accum += needles_size)
-            offsets_res[i] = accum;
 
         return ColumnArray::create(std::move(col_res), std::move(col_offsets));
     }
